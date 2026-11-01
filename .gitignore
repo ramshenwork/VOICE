@@ -1,0 +1,26 @@
+.env
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+*.egg-info/
+.pytest_cache/
+.DS_Store
+
+# models and caches — never commit weights
+models/*
+!models/.gitkeep
+.cache/
+*.pt
+*.onnx
+*.bin
+*.safetensors
+
+# local data and logs
+data/*.db
+logs/*
+!logs/.gitkeep
+*.wav
+*.aiff
+.env.example

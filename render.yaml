@@ -1,0 +1,27 @@
+services:
+  - type: web
+    name: voice-agent
+    runtime: python
+    plan: standard          # free/starter will OOM: Whisper + Kokoro + torch
+    buildCommand: pip install -r requirements-server.txt
+    startCommand: uvicorn server.app:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.11"
+      - key: LLM_PROVIDER
+        value: anthropic
+      - key: LLM_MODEL
+        value: claude-sonnet-4-5
+      - key: LLM_API_KEY
+        sync: false          # set this in the Render dashboard
+      - key: STT_MODEL
+        value: tiny.en       # bigger models are too slow on shared CPU
+      - key: STT_COMPUTE_TYPE
+        value: int8
+      - key: TTS_ENGINE
+        value: kokoro
+      - key: DEFAULT_LOCATION
+        value: Hyderabad
+      - key: LOG_LEVEL
+        value: INFO
