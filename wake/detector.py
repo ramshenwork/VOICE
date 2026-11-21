@@ -113,3 +113,38 @@ class AwakeSession:
     def expired(self) -> bool:
         return (self.awake and self._deadline is not None
                 and self.clock() >= self._deadline)
+
+
+class TranscriptWake:
+    """
+    Wake on a *name* heard in a transcript, for names with no trained
+    wake-word model. While asleep, the VAD cuts speech into utterances, short
+    ones are transcribed, and this decides whether the name was in it.
+
+        match("Hey Riya, what's the weather?") -> (True, "what's the weather?")
+        match("Riya")                          -> (True, "")
+        match("I'm listening to Rhea's song")  -> (False, "")   # not addressed
+
+    Only an utterance that *starts* by addressing her counts ("Riya ...",
+    "Hey Riya ...", "OK Riya ..."), so the name merely being mentioned, or
+    sung in a track, doesn't wake her.
+    """
+
+    GREETING = r"(?:hey|hi|hello|ok|okay|oi|yo)"
+
+    def __init__(self, phrases: str | list[str], max_utterance_s: float = 8.0):
+        import re
+        names = phrases.split(",") if isinstance(phrases, str) else list(phrases)
+        names = sorted({n.strip().lower() for n in names if n.strip()}, key=len, reverse=True)
+        if not names:
+            raise WakeWordError("WAKE_PHRASES is empty")
+        alt = "|".join(re.escape(n) for n in names)
+        self._re = re.compile(rf"^\W*(?:{self.GREETING}\W+)?(?:{alt})\b[\W]*", re.IGNORECASE)
+        self.max_utterance_s = max_utterance_s
+        self.names = names
+
+    def match(self, text: str) -> tuple[bool, str]:
+        m = self._re.match(text or "")
+        if not m:
+            return False, ""
+        return True, text[m.end():].strip()

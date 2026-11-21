@@ -86,3 +86,24 @@ def test_wake_word_is_stripped_from_the_request():
     p = InputProcessor(wake_word="Jarvis")
     assert p.process("Hey Jarvis, what's the time?").text == "What's the time?"
     assert p.process("Tell Jarvis hello").text == "Tell Jarvis hello"
+
+
+def test_name_wake_with_and_without_a_request():
+    from wake.detector import TranscriptWake
+    w = TranscriptWake("riya,ria,rhea")
+    assert w.match("Hey Riya, what's the weather?") == (True, "what's the weather?")
+    assert w.match("Riya.") == (True, "")
+    assert w.match("OK Rhea what time is it") == (True, "what time is it")
+
+
+def test_name_wake_ignores_mentions_and_lookalikes():
+    from wake.detector import TranscriptWake
+    w = TranscriptWake("riya,ria")
+    assert w.match("I was talking to Riya yesterday")[0] is False
+    assert w.match("Riyadh is hot today")[0] is False
+    assert w.match("")[0] is False
+
+
+def test_processor_strips_name_aliases():
+    p = InputProcessor(wake_word="Riya", wake_aliases=["ria", "rhea"])
+    assert p.process("Hey Ria, note this down").text == "Note this down"

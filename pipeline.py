@@ -51,7 +51,8 @@ class Pipeline:
         self.cfg = config or load_config()
         self.vad = VADController(self.cfg.vad, self.cfg.audio.sample_rate)
         self.stt = STTEngine(self.cfg.stt)
-        self.processor = InputProcessor(wake_word=self.cfg.assistant.name)
+        self.processor = InputProcessor(wake_word=self.cfg.assistant.name,
+                                        wake_aliases=self.cfg.wake.phrases.split(","))
         self.tts = TTSEngine(self.cfg.tts)
         self.memory = MemoryStore(self.cfg.db_path())
         expenses = PersonalDataTool(self.cfg.tools, self.cfg.db_path())

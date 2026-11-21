@@ -90,6 +90,8 @@ class STTConfig:
     beam_size: int = field(default_factory=lambda: _i("STT_BEAM_SIZE", 1))
     vad_filter: bool = field(default_factory=lambda: _b("STT_VAD_FILTER", False))
     min_audio_ms: int = field(default_factory=lambda: _i("STT_MIN_AUDIO_MS", 300))
+    # Vocabulary hint for the recogniser: names and words it should expect.
+    prompt: str = field(default_factory=lambda: _s("STT_PROMPT", "Hey Riya."))
 
 
 # --------------------------------------------------------------------------
@@ -98,8 +100,8 @@ class STTConfig:
 @dataclass(frozen=True)
 class TTSConfig:
     engine: str = field(default_factory=lambda: _s("TTS_ENGINE", "kokoro"))
-    voice: str = field(default_factory=lambda: _s("TTS_VOICE", "bm_george"))
-    lang_code: str = field(default_factory=lambda: _s("TTS_LANG_CODE", "b"))
+    voice: str = field(default_factory=lambda: _s("TTS_VOICE", "af_heart"))
+    lang_code: str = field(default_factory=lambda: _s("TTS_LANG_CODE", "a"))
     speed: float = field(default_factory=lambda: _f("TTS_SPEED", 1.0))
     sample_rate: int = field(default_factory=lambda: _i("TTS_SAMPLE_RATE", 24000))
 
@@ -146,7 +148,7 @@ class ServerConfig:
 # --------------------------------------------------------------------------
 @dataclass(frozen=True)
 class AssistantConfig:
-    name: str = field(default_factory=lambda: _s("ASSISTANT_NAME", "Jarvis"))
+    name: str = field(default_factory=lambda: _s("ASSISTANT_NAME", "Riya"))
     # How the assistant addresses you. Empty -> "sir".
     user_name: str = field(default_factory=lambda: _s("USER_NAME", ""))
     timezone: str = field(default_factory=lambda: _s("TIMEZONE", "Asia/Kolkata"))
@@ -165,7 +167,18 @@ class AssistantConfig:
 # --------------------------------------------------------------------------
 @dataclass(frozen=True)
 class WakeConfig:
+    """
+    Two wake engines:
+      transcript   -- the speech recogniser listens for the name ("Riya") in
+                      anything said. Works for any name with no training, at
+                      the cost of more CPU while asleep.
+      openwakeword -- a tiny dedicated model; near-zero CPU, but only for names
+                      that have a trained model (e.g. hey_jarvis).
+    """
     enabled: bool = field(default_factory=lambda: _b("WAKE_WORD_ENABLED", True))
+    engine: str = field(default_factory=lambda: _s("WAKE_WORD_ENGINE", "transcript"))
+    # transcript engine: spellings the recogniser may produce for the name.
+    phrases: str = field(default_factory=lambda: _s("WAKE_PHRASES", "riya,ria,rhea,reya,riyah,reah"))
     model: str = field(default_factory=lambda: _s("WAKE_WORD_MODEL", "hey_jarvis"))
     threshold: float = field(default_factory=lambda: _f("WAKE_WORD_THRESHOLD", 0.5))
     # After a reply, stay listening this long for a follow-up without the wake word.

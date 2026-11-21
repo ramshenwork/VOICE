@@ -107,6 +107,9 @@ class STTEngine:
                 beam_size=self.cfg.beam_size,
                 vad_filter=self.cfg.vad_filter,
                 condition_on_previous_text=False,
+                # Names Whisper has never seen ("Riya") get spelled as whatever
+                # it knows ("Rhea", "Re-e"). A hint makes it spell them right.
+                initial_prompt=self.cfg.prompt or None,
             )
             parts, logprobs, no_speech = [], [], []
             for seg in segments:

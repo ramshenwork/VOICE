@@ -1,29 +1,38 @@
-# Jarvis -- a personal local voice agent
+# R.I.Y.A. -- Ready If You Ask
 
-You say "Hey Jarvis". It turns Spotify down, listens, works out when you've
-finished, understands you, looks things up if it needs to, and talks back in a
-British voice -- with a personality, and a memory of who you are. Runs on your
-laptop.
+A personal local voice assistant. You say "Hey Riya". She turns Spotify down,
+listens, works out when you've finished, understands you, looks things up if
+she needs to, and talks back -- with a personality, and a memory of who you
+are. Runs on your laptop.
 
 ## What it can do now
 
 | Ask it | What happens |
 |---|---|
-| "Hey Jarvis" | wakes up, ducks Spotify, says "Yes, sir?" |
+| "Hey Riya" | wakes up, ducks Spotify, says "Yes, sir?" |
+| "Hey Riya, what's the weather?" | wakes and answers in one go |
 | "Remember my office is in Gachibowli" | stored as a fact it knows from then on, across restarts |
 | "Note this down: ..." / "What did I note about the helmet?" | its own notebook |
 | "I just spent 180 on an auto" | logs the expense |
 | "How much did I spend on food this week?" | reads your expenses |
 | "What's the weather?" | live weather |
 | anything else | conversation, opinions, discussing your projects |
-| "That's all, Jarvis" | goes back to sleep, Spotify comes back up |
+| "That's all, Riya" | goes back to sleep, Spotify comes back up |
 
 After each reply it keeps listening for `FOLLOW_UP_WINDOW_S` (8 s) so you can
 carry on without saying the wake word again. Replies are streamed: it starts
 speaking the first sentence while the model is still writing the rest.
 
-Personalise it in `.env`: `ASSISTANT_NAME`, `USER_NAME` (empty = "sir"),
-`TTS_VOICE`. Memories, notes, expenses and the conversation log all live in
+Personalise her in `.env`: `ASSISTANT_NAME`, `USER_NAME` (empty = "sir"),
+`TTS_VOICE`.
+
+**About the wake word.** No ready-made model exists for "Riya", so by default
+(`WAKE_WORD_ENGINE=transcript`) she wakes when the speech recogniser hears an
+utterance that *starts* with her name. That works for any name with no
+training, but uses more CPU while asleep than a dedicated model, and loud
+music through laptop speakers can keep the recogniser busy -- headphones fix
+both. A dedicated "hey riya" openWakeWord model can be trained later for
+near-zero idle CPU. Memories, notes, expenses and the conversation log all live in
 `data/agent.db` on your machine.
 
 ---
@@ -85,7 +94,7 @@ If PortAudio is missing: `brew install portaudio` then reinstall
 
 | Command | What it does |
 |---|---|
-| `python main.py` | Full voice loop: "Hey Jarvis" to wake, mic in, speaker out |
+| `python main.py` | Full voice loop: "Hey Riya" to wake, mic in, speaker out |
 | `python main.py --text` | Type, hear the answer spoken. No mic needed |
 | `python main.py --check` | Load every component and report timings |
 | `python main.py --devices` | List microphones, so you can pin one in `.env` |
@@ -416,7 +425,7 @@ voice_agent/
 ├── tools/personal_data.py   SQLite expenses (read + log_expense)
 ├── tools/memory.py          memory + notes tools
 ├── memory/store.py          memories, notes, conversation log (SQLite)
-├── wake/detector.py         "hey jarvis" (openWakeWord) + awake window
+├── wake/detector.py         wake by name ("hey riya") or openWakeWord + awake window
 ├── audio/ducking.py         Spotify volume ducking (macOS)
 ├── tts/engine.py            Kokoro + sentence chunking
 ├── server/app.py            FastAPI + WebSocket (web runtime)

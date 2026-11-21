@@ -45,11 +45,15 @@ class ProcessedInput:
 
 class InputProcessor:
     def __init__(self, min_chars: int = 2, strip_fillers: bool = True,
-                 wake_word: str = "", require_wake_word: bool = False):
+                 wake_word: str = "", require_wake_word: bool = False,
+                 wake_aliases: list[str] | None = None):
         self.min_chars = min_chars
         self.strip_fillers = strip_fillers
         self.wake_word = wake_word.lower().strip()
         self.require_wake_word = require_wake_word and bool(self.wake_word)
+        # Other spellings the recogniser produces for the name ("Ria", "Rhea").
+        names = {self.wake_word, *(a.lower().strip() for a in (wake_aliases or []))}
+        self._wake_alt = "|".join(re.escape(n) for n in sorted(names - {""}, key=len, reverse=True))
 
     def process(self, transcription) -> ProcessedInput:
         raw = getattr(transcription, "text", transcription) or ""
@@ -73,7 +77,7 @@ class InputProcessor:
         if self.wake_word and not self.require_wake_word:
             # "Hey Jarvis, what's the time" -> "what's the time". The wake word
             # detector already did its job; the name is not part of the request.
-            m = re.match(rf"^\s*(?:(?:hey|hi|ok|okay|hello)[\s,]+)?{re.escape(self.wake_word)}\b[\s,.!?]*",
+            m = re.match(rf"^\s*(?:(?:hey|hi|ok|okay|hello)[\s,]+)?(?:{self._wake_alt})\b[\s,.!?]*",
                          text, re.IGNORECASE)
             if m and m.end() < len(text):
                 text = text[m.end():]

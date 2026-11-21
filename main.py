@@ -1,15 +1,16 @@
 """
 Local voice agent -- microphone in, speaker out.
 
-    python main.py              full voice loop ("Hey Jarvis" to wake)
+    python main.py              full voice loop ("Hey Riya" to wake)
     python main.py --text       typed input, spoken output (no mic needed)
     python main.py --devices    list audio devices
     python main.py --check      verify every component loads
 
 Wake word
 ---------
-While asleep only the tiny wake word model runs. "Hey Jarvis" wakes it: Spotify
-is turned down, it says "Yes?", and it listens. After each reply it keeps
+While asleep she only listens for her name. "Hey Riya" wakes her: Spotify is
+turned down, she says "Yes, sir?", and listens -- or, if you said the whole
+request in one breath ("Hey Riya, what's the weather?"), she just answers. After each reply it keeps
 listening for FOLLOW_UP_WINDOW_S so you can carry on without the wake word,
 then goes back to sleep and Spotify comes back up. "That's all" sends it to
 sleep straight away. WAKE_WORD_ENABLED=false gives the old always-listening mode.
@@ -49,7 +50,7 @@ from audio.output import SpeakerStream
 from config import load_config
 from pipeline import Pipeline, setup_logging
 from vad.detector import VADEvent
-from wake.detector import AwakeSession, WakeWordDetector, WakeWordError
+from wake.detector import AwakeSession, TranscriptWake, WakeWordDetector, WakeWordError
 
 logger = logging.getLogger("main")
 
@@ -75,7 +76,9 @@ def cmd_check(pipeline: Pipeline) -> int:
         ("STT (faster-whisper)", pipeline.stt.load),
         ("TTS", pipeline.tts.load),
         ("LLM", pipeline.agent.load),
-        ("Wake word", WakeWordDetector(pipeline.cfg.wake).load),
+        ("Wake word", (lambda: TranscriptWake(pipeline.cfg.wake.phrases))
+                      if pipeline.cfg.wake.engine.lower() != "openwakeword"
+                      else WakeWordDetector(pipeline.cfg.wake).load),
     ]:
         t0 = time.perf_counter()
         try:
@@ -184,23 +187,28 @@ def cmd_voice(pipeline: Pipeline) -> int:
         return 1
 
     # -- wake word: optional, and the loop degrades to always-listening ----
-    wake = None
+    wake = None          # openWakeWord model, or
+    name_wake = None     # name heard in a transcript ("Hey Riya")
     if cfg.wake.enabled:
-        wake = WakeWordDetector(cfg.wake)
         try:
-            wake.load()
+            if cfg.wake.engine.lower() == "openwakeword":
+                wake = WakeWordDetector(cfg.wake)
+                wake.load()
+            else:
+                name_wake = TranscriptWake(cfg.wake.phrases)
         except WakeWordError as exc:
             logger.warning("%s -- falling back to always-listening", exc)
-            wake = None
+            wake = name_wake = None
+    sleeps = bool(wake or name_wake)
     session = AwakeSession(cfg.wake.follow_up_s)
-    if wake is None:
+    if not sleeps:
         session.wake()
         session.follow_up_s = float("inf")
-    ducker = SpotifyDucker(enabled=bool(wake) and cfg.wake.duck_spotify,
+    ducker = SpotifyDucker(enabled=sleeps and cfg.wake.duck_spotify,
                            duck_volume=cfg.wake.duck_volume)
 
     ack = None
-    if wake and BARGE_IN and cfg.wake.acknowledgement:
+    if sleeps and BARGE_IN and cfg.wake.acknowledgement:
         # Pre-rendered so answering the wake word costs nothing.
         ack = pipeline.tts.synthesize(cfg.wake.acknowledgement.replace("{address}",
                                                                        cfg.assistant.address))
@@ -213,19 +221,36 @@ def cmd_voice(pipeline: Pipeline) -> int:
         ducker.restore()
         _status(f"[ asleep -- say 'hey {name.lower()}' ]")
 
-    awaiting_playback_end = False
-    sleep_after_reply = False
+    flags = {"awaiting_playback_end": False, "sleep_after_reply": False}
+
+    def wake_up() -> None:
+        ducker.duck()
+        session.wake()
+        pipeline.vad.reset()
+        if ack is not None and ack.size:
+            speaker.play(ack)
+        _status("[ listening... ]")
+
+    def answer(text: str) -> None:
+        text = pipeline.processor.process(text).text or text
+        print(f"\r  you  : {text:<40}")
+        print(f"  {name.lower():<5}: ", end="", flush=True)
+        stream_reply(pipeline, speaker, text, echo=True)
+        print()
+        pipeline.vad.reset()
+        flags["awaiting_playback_end"] = True
+        flags["sleep_after_reply"] = sleeps and bool(SLEEP_PHRASES.search(text))
     last_meter = 0.0
 
     print("\n" + "=" * 56)
-    if wake:
-        print(f"  {name} is asleep. Say 'Hey {name}' to wake it. Ctrl-C to quit.")
+    if sleeps:
+        print(f"  {name} is asleep. Say 'Hey {name}' to wake her. Ctrl-C to quit.")
     else:
         print(f"  {name} is listening. Speak naturally. Ctrl-C to quit.")
     print(f"  barge-in: {'on' if BARGE_IN else 'off'}   voice: {cfg.tts.voice}"
           f"   spotify ducking: {'on' if ducker.enabled else 'off'}")
     print("=" * 56 + "\n")
-    if wake:
+    if sleeps:
         _status(f"[ asleep -- say 'hey {name.lower()}' ]")
 
     try:
@@ -234,28 +259,45 @@ def cmd_voice(pipeline: Pipeline) -> int:
                 playing = speaker.is_playing
 
                 # ---- asleep: only the wake word model runs -------------
-                if not session.awake:
+                if not session.awake and wake is not None:
                     if wake.process(chunk):
                         logger.info("wake word (score %.2f)", wake.last_score)
-                        ducker.duck()
-                        session.wake()
-                        pipeline.vad.reset()
-                        if ack is not None and ack.size:
-                            speaker.play(ack)
-                        _status("[ listening... ]")
+                        wake_up()
+                    continue
+
+                # ---- asleep, name engine: listen for "Riya ..." --------
+                if not session.awake and name_wake is not None:
+                    for result in pipeline.vad.process(chunk):
+                        if result.event is not VADEvent.SPEECH_ENDED or result.segment is None:
+                            continue
+                        if result.segment_duration_s > name_wake.max_utterance_s:
+                            continue  # long speech/music: not someone calling her
+                        heard = pipeline.stt.transcribe(result.segment, cfg.audio.sample_rate)
+                        woke, rest = name_wake.match(getattr(heard, "text", ""))
+                        if not woke:
+                            logger.debug("asleep, ignored: %r", getattr(heard, "text", ""))
+                            continue
+                        logger.info("woken by name: %r", heard.text)
+                        if len(rest.split()) >= 2:
+                            # "Hey Riya, what's the weather?" -- answer straight away.
+                            ducker.duck()
+                            session.wake()
+                            answer(rest)
+                        else:
+                            wake_up()
                     continue
 
                 # ---- awake: reply playback finished -> start window ----
-                if awaiting_playback_end and not playing:
-                    awaiting_playback_end = False
-                    if sleep_after_reply:
-                        sleep_after_reply = False
+                if flags["awaiting_playback_end"] and not playing:
+                    flags["awaiting_playback_end"] = False
+                    if flags["sleep_after_reply"]:
+                        flags["sleep_after_reply"] = False
                         go_to_sleep()
                         continue
                     session.reply_finished()
-                    _status("[ listening... ]" if wake else "")
+                    _status("[ listening... ]")
 
-                if wake and not playing and session.expired():
+                if sleeps and not playing and session.expired():
                     go_to_sleep()
                     continue
 
@@ -278,17 +320,12 @@ def cmd_voice(pipeline: Pipeline) -> int:
                             result.segment, cfg.audio.sample_rate)
                         if text is None:
                             session.reply_finished()
-                            _status("[ listening... ]" if wake else "")
+                            _status("[ listening... ]" if sleeps else "")
                             continue
-                        print(f"\r  you  : {text:<40}")
-                        print(f"  {name.lower():<5}: ", end="", flush=True)
-                        stream_reply(pipeline, speaker, text, echo=True)
-                        print()
-                        awaiting_playback_end = True
-                        sleep_after_reply = bool(wake) and bool(SLEEP_PHRASES.search(text))
+                        answer(text)
 
                 # cheap level meter while idle in always-listening mode
-                if not wake and not playing and time.time() - last_meter > 0.25:
+                if not sleeps and not playing and time.time() - last_meter > 0.25:
                     level = min(20, int(rms(chunk) * 260))
                     if pipeline.vad.state.value == "idle":
                         bar = "#" * level + "-" * (20 - level)
