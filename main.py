@@ -1,10 +1,18 @@
 """
 Local voice agent -- microphone in, speaker out.
 
-    python main.py              full voice loop
+    python main.py              full voice loop ("Hey Jarvis" to wake)
     python main.py --text       typed input, spoken output (no mic needed)
     python main.py --devices    list audio devices
     python main.py --check      verify every component loads
+
+Wake word
+---------
+While asleep only the tiny wake word model runs. "Hey Jarvis" wakes it: Spotify
+is turned down, it says "Yes?", and it listens. After each reply it keeps
+listening for FOLLOW_UP_WINDOW_S so you can carry on without the wake word,
+then goes back to sleep and Spotify comes back up. "That's all" sends it to
+sleep straight away. WAKE_WORD_ENABLED=false gives the old always-listening mode.
 
 The main loop is single-threaded on purpose. Audio capture already runs on its
 own OS thread and hands frames over a queue, so this thread is free to do VAD
@@ -28,16 +36,20 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+import re
 import sys
 import time
 
 import numpy as np
 
+from agent.agent import AgentReply
+from audio.ducking import SpotifyDucker
 from audio.input import AudioInputError, MicrophoneStream, list_input_devices, rms
 from audio.output import SpeakerStream
 from config import load_config
 from pipeline import Pipeline, setup_logging
 from vad.detector import VADEvent
+from wake.detector import AwakeSession, WakeWordDetector, WakeWordError
 
 logger = logging.getLogger("main")
 
@@ -63,6 +75,7 @@ def cmd_check(pipeline: Pipeline) -> int:
         ("STT (faster-whisper)", pipeline.stt.load),
         ("TTS", pipeline.tts.load),
         ("LLM", pipeline.agent.load),
+        ("Wake word", WakeWordDetector(pipeline.cfg.wake).load),
     ]:
         t0 = time.perf_counter()
         try:
@@ -97,7 +110,8 @@ def cmd_text(pipeline: Pipeline, speak: bool = True) -> int:
             logger.warning("no speaker (%s); text only", exc)
             speaker = None
 
-    print("\nTyped mode. Ctrl-C to quit.\n")
+    name = pipeline.cfg.assistant.name.lower()
+    print(f"\nTyped mode with {pipeline.cfg.assistant.name}. Ctrl-C to quit.\n")
     try:
         while True:
             try:
@@ -108,14 +122,12 @@ def cmd_text(pipeline: Pipeline, speak: bool = True) -> int:
                 continue
             if text.lower() in ("quit", "exit"):
                 break
-            reply = pipeline.agent.respond(text)
-            print(f"agent> {reply.text}")
-            if reply.tools_used:
+            print(f"{name}> ", end="", flush=True)
+            reply = stream_reply(pipeline, speaker, text, echo=True)
+            if reply and reply.tools_used:
                 print(f"       (tools: {', '.join(reply.tools_used)})")
             if speaker:
-                for chunk in pipeline.tts.stream(reply.text):
-                    speaker.play(chunk)
-                speaker.wait_until_done(timeout=30)
+                speaker.wait_until_done(timeout=60)
     except KeyboardInterrupt:
         pass
     finally:
@@ -124,14 +136,44 @@ def cmd_text(pipeline: Pipeline, speak: bool = True) -> int:
     return 0
 
 
-def speak(pipeline: Pipeline, speaker: SpeakerStream, text: str) -> None:
-    """Stream TTS to the speaker sentence by sentence."""
-    for chunk in pipeline.tts.stream(text):
-        speaker.play(chunk)
+def stream_reply(pipeline: Pipeline, speaker: SpeakerStream | None, text: str,
+                 echo: bool = False) -> AgentReply | None:
+    """Run one turn, speaking each sentence the moment the model finishes it."""
+    reply = None
+    t0 = time.perf_counter()
+    first = True
+    for item in pipeline.agent.respond_stream(text):
+        if isinstance(item, AgentReply):
+            reply = item
+            continue
+        if first:
+            logger.info("latency: first sentence after %.0fms", (time.perf_counter() - t0) * 1000)
+            first = False
+        if echo:
+            print(item, end=" ", flush=True)
+        if speaker:
+            for chunk in pipeline.tts.stream(item):
+                speaker.play(chunk)
+    if echo:
+        print()
+    if reply:
+        logger.info("latency: agent=%.0fms tools=%s",
+                    reply.latency_s * 1000, reply.tools_used or "none")
+    return reply
+
+
+SLEEP_PHRASES = re.compile(
+    r"\b(that'?s all|that will be all|go to sleep|stop listening|never ?mind|good ?night)\b",
+    re.IGNORECASE)
+
+
+def _status(msg: str) -> None:
+    print(f"\r  {msg:<44}", end="", flush=True)
 
 
 def cmd_voice(pipeline: Pipeline) -> int:
     cfg = pipeline.cfg
+    name = cfg.assistant.name
     pipeline.warmup()
 
     try:
@@ -141,18 +183,81 @@ def cmd_voice(pipeline: Pipeline) -> int:
         logger.error("speaker unavailable: %s", exc)
         return 1
 
-    base_threshold = pipeline.vad.cfg.speech_threshold
+    # -- wake word: optional, and the loop degrades to always-listening ----
+    wake = None
+    if cfg.wake.enabled:
+        wake = WakeWordDetector(cfg.wake)
+        try:
+            wake.load()
+        except WakeWordError as exc:
+            logger.warning("%s -- falling back to always-listening", exc)
+            wake = None
+    session = AwakeSession(cfg.wake.follow_up_s)
+    if wake is None:
+        session.wake()
+        session.follow_up_s = float("inf")
+    ducker = SpotifyDucker(enabled=bool(wake) and cfg.wake.duck_spotify,
+                           duck_volume=cfg.wake.duck_volume)
+
+    ack = None
+    if wake and BARGE_IN and cfg.wake.acknowledgement:
+        # Pre-rendered so answering the wake word costs nothing.
+        ack = pipeline.tts.synthesize(cfg.wake.acknowledgement.replace("{address}",
+                                                                       cfg.assistant.address))
+
+    def go_to_sleep() -> None:
+        session.sleep()
+        pipeline.vad.reset()
+        if wake:
+            wake.reset()
+        ducker.restore()
+        _status(f"[ asleep -- say 'hey {name.lower()}' ]")
+
+    awaiting_playback_end = False
+    sleep_after_reply = False
     last_meter = 0.0
 
-    print("\n" + "=" * 52)
-    print("  Listening. Speak naturally. Ctrl-C to quit.")
-    print(f"  barge-in: {'on' if BARGE_IN else 'off'}   tts: {pipeline.tts.backend}")
-    print("=" * 52 + "\n")
+    print("\n" + "=" * 56)
+    if wake:
+        print(f"  {name} is asleep. Say 'Hey {name}' to wake it. Ctrl-C to quit.")
+    else:
+        print(f"  {name} is listening. Speak naturally. Ctrl-C to quit.")
+    print(f"  barge-in: {'on' if BARGE_IN else 'off'}   voice: {cfg.tts.voice}"
+          f"   spotify ducking: {'on' if ducker.enabled else 'off'}")
+    print("=" * 56 + "\n")
+    if wake:
+        _status(f"[ asleep -- say 'hey {name.lower()}' ]")
 
     try:
         with MicrophoneStream(cfg.audio) as mic:
             for chunk in mic.chunks():
                 playing = speaker.is_playing
+
+                # ---- asleep: only the wake word model runs -------------
+                if not session.awake:
+                    if wake.process(chunk):
+                        logger.info("wake word (score %.2f)", wake.last_score)
+                        ducker.duck()
+                        session.wake()
+                        pipeline.vad.reset()
+                        if ack is not None and ack.size:
+                            speaker.play(ack)
+                        _status("[ listening... ]")
+                    continue
+
+                # ---- awake: reply playback finished -> start window ----
+                if awaiting_playback_end and not playing:
+                    awaiting_playback_end = False
+                    if sleep_after_reply:
+                        sleep_after_reply = False
+                        go_to_sleep()
+                        continue
+                    session.reply_finished()
+                    _status("[ listening... ]" if wake else "")
+
+                if wake and not playing and session.expired():
+                    go_to_sleep()
+                    continue
 
                 if playing and not BARGE_IN:
                     continue  # deaf while speaking: no self-trigger, no barge-in
@@ -164,26 +269,30 @@ def cmd_voice(pipeline: Pipeline) -> int:
                                 continue
                             logger.info("barge-in: stopping playback")
                             speaker.stop()
-                        print("\r  [ listening... ]           ", end="", flush=True)
+                        session.user_speaking()
+                        _status("[ listening... ]")
 
                     elif result.event is VADEvent.SPEECH_ENDED and result.segment is not None:
-                        print("\r  [ thinking...  ]           ", end="", flush=True)
-                        reply, transcript = pipeline.handle_utterance(
+                        _status("[ thinking... ]")
+                        text, reason = pipeline.transcribe_utterance(
                             result.segment, cfg.audio.sample_rate)
-                        if reply is None:
-                            print("\r" + " " * 30 + "\r", end="", flush=True)
+                        if text is None:
+                            session.reply_finished()
+                            _status("[ listening... ]" if wake else "")
                             continue
-                        print(f"\r  you  : {transcript}")
-                        print(f"  agent: {reply.text}\n")
-                        speak(pipeline, speaker, reply.text)
+                        print(f"\r  you  : {text:<40}")
+                        print(f"  {name.lower():<5}: ", end="", flush=True)
+                        stream_reply(pipeline, speaker, text, echo=True)
+                        print()
+                        awaiting_playback_end = True
+                        sleep_after_reply = bool(wake) and bool(SLEEP_PHRASES.search(text))
 
-                # cheap level meter while idle
-                if not playing and time.time() - last_meter > 0.25:
+                # cheap level meter while idle in always-listening mode
+                if not wake and not playing and time.time() - last_meter > 0.25:
                     level = min(20, int(rms(chunk) * 260))
                     if pipeline.vad.state.value == "idle":
                         bar = "#" * level + "-" * (20 - level)
-                        print(f"\r  [{bar}] p={pipeline.vad.last_probability:.2f}",
-                              end="", flush=True)
+                        _status(f"[{bar}] p={pipeline.vad.last_probability:.2f}")
                     last_meter = time.time()
 
     except AudioInputError as exc:
@@ -192,6 +301,8 @@ def cmd_voice(pipeline: Pipeline) -> int:
     except KeyboardInterrupt:
         print("\n\nStopped.")
     finally:
+        ducker.restore()
+        time.sleep(0.3)  # let the restore run before the process exits
         speaker.close()
     return 0
 

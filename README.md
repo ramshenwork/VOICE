@@ -1,7 +1,30 @@
-# Small local voice agent
+# Jarvis -- a personal local voice agent
 
-You talk. It listens, works out when you've finished, understands you, looks
-things up if it needs to, and talks back. Runs on your laptop.
+You say "Hey Jarvis". It turns Spotify down, listens, works out when you've
+finished, understands you, looks things up if it needs to, and talks back in a
+British voice -- with a personality, and a memory of who you are. Runs on your
+laptop.
+
+## What it can do now
+
+| Ask it | What happens |
+|---|---|
+| "Hey Jarvis" | wakes up, ducks Spotify, says "Yes, sir?" |
+| "Remember my office is in Gachibowli" | stored as a fact it knows from then on, across restarts |
+| "Note this down: ..." / "What did I note about the helmet?" | its own notebook |
+| "I just spent 180 on an auto" | logs the expense |
+| "How much did I spend on food this week?" | reads your expenses |
+| "What's the weather?" | live weather |
+| anything else | conversation, opinions, discussing your projects |
+| "That's all, Jarvis" | goes back to sleep, Spotify comes back up |
+
+After each reply it keeps listening for `FOLLOW_UP_WINDOW_S` (8 s) so you can
+carry on without saying the wake word again. Replies are streamed: it starts
+speaking the first sentence while the model is still writing the rest.
+
+Personalise it in `.env`: `ASSISTANT_NAME`, `USER_NAME` (empty = "sir"),
+`TTS_VOICE`. Memories, notes, expenses and the conversation log all live in
+`data/agent.db` on your machine.
 
 ---
 
@@ -50,6 +73,7 @@ cp .env.example .env
 # open .env, set LLM_API_KEY
 
 python data/seed.py        # sample expenses so it has something to talk about
+                           # (--reset replaces them with fresh ones dated around today)
 python main.py --check     # verify every model loads
 python main.py             # talk to it
 ```
@@ -61,7 +85,7 @@ If PortAudio is missing: `brew install portaudio` then reinstall
 
 | Command | What it does |
 |---|---|
-| `python main.py` | Full voice loop: mic in, speaker out |
+| `python main.py` | Full voice loop: "Hey Jarvis" to wake, mic in, speaker out |
 | `python main.py --text` | Type, hear the answer spoken. No mic needed |
 | `python main.py --check` | Load every component and report timings |
 | `python main.py --devices` | List microphones, so you can pin one in `.env` |
@@ -359,7 +383,7 @@ share a link, not because it's faster.
 ## 10. Tests
 
 ```bash
-pytest -m "not network"     # 54 tests, no network, no models, <1 s
+pytest -m "not network"     # 79 tests, no network, no models, <1 s
 pytest                      # includes the live Open-Meteo test
 STT_RUN_MODEL=1 pytest tests/test_stt.py
 ```
@@ -389,12 +413,16 @@ voice_agent/
 ├── agent/state.py           conversation history with safe trimming
 ├── tools/base.py            Tool contract + registry
 ├── tools/weather.py         Open-Meteo
-├── tools/personal_data.py   SQLite expenses
+├── tools/personal_data.py   SQLite expenses (read + log_expense)
+├── tools/memory.py          memory + notes tools
+├── memory/store.py          memories, notes, conversation log (SQLite)
+├── wake/detector.py         "hey jarvis" (openWakeWord) + awake window
+├── audio/ducking.py         Spotify volume ducking (macOS)
 ├── tts/engine.py            Kokoro + sentence chunking
 ├── server/app.py            FastAPI + WebSocket (web runtime)
 ├── web/index.html           browser console
 ├── data/seed.py             sample expense data
-└── tests/                   54 offline tests
+└── tests/                   79 offline tests
 ```
 
 ---

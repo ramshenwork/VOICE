@@ -1,5 +1,9 @@
 """Seed the expense database with sample rows so the personal-data tool has
-something to answer with on first run.  Run:  python data/seed.py"""
+something to answer with on first run.
+
+    python data/seed.py            seed only if the table is empty
+    python data/seed.py --reset    wipe ALL expenses and re-seed relative to today
+"""
 import random, sys
 from datetime import date, timedelta
 from pathlib import Path
@@ -23,8 +27,12 @@ CATALOG = {
 def main() -> int:
     cfg = load_config()
     tool = PersonalDataTool(cfg.tools, cfg.db_path())
+    if "--reset" in sys.argv:
+        print(f"Removing {tool.count()} existing expenses.")
+        tool.clear()
     if tool.count() > 0:
-        print(f"Database already has {tool.count()} rows. Nothing seeded.")
+        print(f"Database already has {tool.count()} rows. Nothing seeded. "
+              "Use --reset to replace them with fresh sample data.")
         return 0
 
     random.seed(7)

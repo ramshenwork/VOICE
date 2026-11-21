@@ -31,7 +31,7 @@ import logging
 import re
 import uuid
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Iterator, Optional, Union
 
 logger = logging.getLogger(__name__)
 
@@ -58,10 +58,25 @@ class LLMError(RuntimeError):
     pass
 
 
+StreamItem = Union[str, LLMResponse]
+
+
 class BaseLLM:
     def complete(self, system: str, messages: list[dict],
                  tools: list[dict] | None = None) -> LLMResponse:
         raise NotImplementedError
+
+    def stream(self, system: str, messages: list[dict],
+               tools: list[dict] | None = None) -> Iterator[StreamItem]:
+        """Yield text deltas (str) as they arrive, then exactly one final
+        LLMResponse holding the full text and any tool calls.
+
+        Default: no real streaming, one delta then the response. Providers
+        that can stream override this; the contract is the same either way."""
+        resp = self.complete(system, messages, tools)
+        if resp.text:
+            yield resp.text
+        yield resp
 
 
 # --------------------------------------------------------------------------
@@ -78,22 +93,38 @@ class AnthropicLLM(BaseLLM):
             raise LLMError("pip install anthropic") from exc
         self._client = anthropic.Anthropic(api_key=cfg.api_key, timeout=cfg.timeout_s)
 
-    def complete(self, system, messages, tools=None) -> LLMResponse:
-        payload = [self._to_anthropic(m) for m in messages]
+    def _kwargs(self, system, messages, tools) -> dict:
         kwargs = dict(
             model=self.cfg.model,
             max_tokens=self.cfg.max_tokens,
             temperature=self.cfg.temperature,
             system=system,
-            messages=payload,
+            messages=[self._to_anthropic(m) for m in messages],
         )
         if tools:
             kwargs["tools"] = tools
+        return kwargs
+
+    def complete(self, system, messages, tools=None) -> LLMResponse:
         try:
-            resp = self._client.messages.create(**kwargs)
+            resp = self._client.messages.create(**self._kwargs(system, messages, tools))
         except Exception as exc:
             raise LLMError(f"Anthropic request failed: {exc}") from exc
+        return self._parse(resp)
 
+    def stream(self, system, messages, tools=None):
+        try:
+            with self._client.messages.stream(**self._kwargs(system, messages, tools)) as s:
+                for text in s.text_stream:
+                    if text:
+                        yield text
+                final = s.get_final_message()
+        except Exception as exc:
+            raise LLMError(f"Anthropic request failed: {exc}") from exc
+        yield self._parse(final)
+
+    @staticmethod
+    def _parse(resp) -> LLMResponse:
         text_parts, calls = [], []
         for block in resp.content:
             if block.type == "text":
@@ -138,7 +169,7 @@ class OpenAILLM(BaseLLM):
             timeout=cfg.timeout_s,
         )
 
-    def complete(self, system, messages, tools=None) -> LLMResponse:
+    def _kwargs(self, system, messages, tools) -> dict:
         payload = [{"role": "system", "content": system}]
         for m in messages:
             payload.append(self._to_openai(m))
@@ -154,8 +185,45 @@ class OpenAILLM(BaseLLM):
                 "function": {"name": t["name"], "description": t["description"],
                              "parameters": t["input_schema"]},
             } for t in tools]
+        return kwargs
+
+    def stream(self, system, messages, tools=None):
+        text_parts: list[str] = []
+        pending: dict[int, dict] = {}
         try:
-            resp = self._client.chat.completions.create(**kwargs)
+            for chunk in self._client.chat.completions.create(
+                    stream=True, **self._kwargs(system, messages, tools)):
+                if not chunk.choices:
+                    continue
+                delta = chunk.choices[0].delta
+                if delta.content:
+                    text_parts.append(delta.content)
+                    yield delta.content
+                for tc in (delta.tool_calls or []):
+                    slot = pending.setdefault(tc.index, {"id": "", "name": "", "args": ""})
+                    if tc.id:
+                        slot["id"] = tc.id
+                    if tc.function and tc.function.name:
+                        slot["name"] += tc.function.name
+                    if tc.function and tc.function.arguments:
+                        slot["args"] += tc.function.arguments
+        except Exception as exc:
+            raise LLMError(f"OpenAI request failed: {exc}") from exc
+
+        calls = []
+        for i in sorted(pending):
+            slot = pending[i]
+            try:
+                args = json.loads(slot["args"] or "{}")
+            except json.JSONDecodeError:
+                args = {}
+            calls.append(ToolCall(id=slot["id"] or f"call_{uuid.uuid4().hex[:8]}",
+                                  name=slot["name"], arguments=args))
+        yield LLMResponse(text="".join(text_parts).strip(), tool_calls=calls)
+
+    def complete(self, system, messages, tools=None) -> LLMResponse:
+        try:
+            resp = self._client.chat.completions.create(**self._kwargs(system, messages, tools))
         except Exception as exc:
             raise LLMError(f"OpenAI request failed: {exc}") from exc
 

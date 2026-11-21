@@ -23,4 +23,3 @@ logs/*
 !logs/.gitkeep
 *.wav
 *.aiff
-.env.example

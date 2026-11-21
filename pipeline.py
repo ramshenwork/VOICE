@@ -17,12 +17,15 @@ import sys
 import time
 
 from agent.agent import Agent
+from agent.prompts import build_system_prompt
 from agent.state import ConversationState
 from config import Config, load_config
+from memory.store import MemoryStore
 from processor.input_processor import InputProcessor
 from stt.engine import STTEngine
 from tools.base import ToolRegistry
-from tools.personal_data import PersonalDataTool
+from tools.memory import MemoryTool, NotesTool
+from tools.personal_data import LogExpenseTool, PersonalDataTool
 from tools.weather import WeatherTool
 from tts.engine import TTSEngine
 from vad.detector import VADController
@@ -48,14 +51,34 @@ class Pipeline:
         self.cfg = config or load_config()
         self.vad = VADController(self.cfg.vad, self.cfg.audio.sample_rate)
         self.stt = STTEngine(self.cfg.stt)
-        self.processor = InputProcessor()
+        self.processor = InputProcessor(wake_word=self.cfg.assistant.name)
         self.tts = TTSEngine(self.cfg.tts)
+        self.memory = MemoryStore(self.cfg.db_path())
+        expenses = PersonalDataTool(self.cfg.tools, self.cfg.db_path())
         self.registry = ToolRegistry([
             WeatherTool(self.cfg.tools),
-            PersonalDataTool(self.cfg.tools, self.cfg.db_path()),
+            expenses,
+            LogExpenseTool(expenses),
+            MemoryTool(self.memory),
+            NotesTool(self.memory),
         ])
         self.state = ConversationState()
-        self.agent = Agent(self.cfg.llm, self.registry, self.state)
+        self.agent = self.make_agent(self.state, restore=True)
+
+    def system_prompt(self) -> str:
+        """Rebuilt every turn: current time + everything remembered."""
+        return build_system_prompt(
+            self.cfg.assistant, self.cfg.tools,
+            self.memory.memories(self.cfg.assistant.memory_in_prompt))
+
+    def make_agent(self, state: ConversationState, restore: bool = False) -> Agent:
+        """One agent per conversation (the web server makes one per socket);
+        all of them share the same memory, notes and tools."""
+        agent = Agent(self.cfg.llm, self.registry, state,
+                      system_prompt=self.system_prompt, on_turn=self.memory.log_turn)
+        if restore:
+            agent.restore(self.memory.recent_turns(self.cfg.assistant.restore_turns))
+        return agent
 
     def warmup(self) -> None:
         t0 = time.perf_counter()
@@ -68,6 +91,21 @@ class Pipeline:
         except Exception as exc:
             logger.error("LLM not ready: %s", exc)
         logger.info("all models ready in %.1fs", time.perf_counter() - t0)
+
+    def transcribe_utterance(self, audio, sample_rate: int = 16000):
+        """audio -> (clean_text, "ok") or (None, reason). STT + cleanup only."""
+        t_stt = time.perf_counter()
+        try:
+            transcription = self.stt.transcribe(audio, sample_rate)
+        except Exception as exc:
+            logger.error("stt error: %s", exc)
+            return None, "stt_error"
+        processed = self.processor.process(transcription)
+        logger.info("latency: stt=%.0fms", (time.perf_counter() - t_stt) * 1000)
+        if not processed.should_respond:
+            logger.info("input discarded: %s (%r)", processed.reason, processed.raw_text)
+            return None, processed.reason
+        return processed.text, "ok"
 
     def handle_utterance(self, audio, sample_rate: int = 16000):
         """

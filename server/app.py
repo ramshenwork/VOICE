@@ -33,7 +33,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
 
-from agent.agent import Agent
+from agent.agent import AgentReply
 from agent.state import ConversationState
 from audio.output import pcm16_to_float
 from config import load_config
@@ -143,7 +143,7 @@ async def ws_voice(ws: WebSocket):
     # Per-connection state. Models are shared; state is not.
     vad = VADController(cfg.vad, cfg.audio.sample_rate, model=pipeline.vad.model)
     state = ConversationState()
-    agent = Agent(cfg.llm, pipeline.registry, state)
+    agent = pipeline.make_agent(state)
     agent.load()
 
     await ws.send_json({"type": "ready", "tts_backend": pipeline.tts.backend})
@@ -184,17 +184,25 @@ async def ws_voice(ws: WebSocket):
 
                     await ws.send_json({"type": "transcript", "text": processed.text})
 
-                    reply = await loop.run_in_executor(None, agent.respond, processed.text)
-                    await ws.send_json({"type": "reply", "text": reply.text,
-                                        "tools_used": reply.tools_used,
-                                        "latency_s": round(reply.latency_s, 2)})
-
-                    # Stream audio per sentence so playback starts early.
-                    for chunk_text in _sentences(pipeline, reply.text):
+                    # Stream: each sentence is synthesised and sent the moment the
+                    # model finishes writing it, so playback starts early.
+                    gen = agent.respond_stream(processed.text)
+                    reply = None
+                    while True:
+                        item = await loop.run_in_executor(None, next, gen, None)
+                        if item is None:
+                            break
+                        if isinstance(item, AgentReply):
+                            reply = item
+                            continue
                         audio_out = await loop.run_in_executor(
-                            None, pipeline.tts.synthesize, chunk_text)
+                            None, pipeline.tts.synthesize, item)
                         if audio_out.size:
                             await ws.send_bytes(to_wav(audio_out, pipeline.tts.sample_rate))
+                    if reply is not None:
+                        await ws.send_json({"type": "reply", "text": reply.text,
+                                            "tools_used": reply.tools_used,
+                                            "latency_s": round(reply.latency_s, 2)})
                     await ws.send_json({"type": "audio_done"})
 
     except WebSocketDisconnect:

@@ -68,6 +68,40 @@ def split_for_speech(text: str, max_chars: int = 220) -> list[str]:
     return chunks
 
 
+class SentenceBuffer:
+    """
+    Turns a stream of LLM text deltas into speakable sentences as soon as each
+    one is complete, so the first sentence can be synthesised while the model
+    is still writing the second.
+
+        buf = SentenceBuffer()
+        for delta in deltas:
+            for sentence in buf.feed(delta): speak(sentence)
+        for sentence in buf.flush(): speak(sentence)
+    """
+
+    def __init__(self, max_chars: int = 220):
+        self.max_chars = max_chars
+        self._buf = ""
+
+    def feed(self, delta: str) -> list[str]:
+        self._buf += delta or ""
+        parts = split_for_speech(self._buf, self.max_chars)
+        if len(parts) <= 1:
+            # One part may still be growing -- unless it is already too long
+            # to wait for, in which case split_for_speech would have cut it.
+            return []
+        ready, last = parts[:-1], parts[-1]
+        # Keep the unfinished tail (with its original trailing space, if any).
+        self._buf = last + (" " if self._buf.endswith((" ", "\n")) else "")
+        return ready
+
+    def flush(self) -> list[str]:
+        parts = split_for_speech(self._buf, self.max_chars)
+        self._buf = ""
+        return parts
+
+
 class TTSEngine:
     """Kokoro-backed synthesiser with a graceful system fallback."""
 

@@ -98,8 +98,8 @@ class STTConfig:
 @dataclass(frozen=True)
 class TTSConfig:
     engine: str = field(default_factory=lambda: _s("TTS_ENGINE", "kokoro"))
-    voice: str = field(default_factory=lambda: _s("TTS_VOICE", "af_heart"))
-    lang_code: str = field(default_factory=lambda: _s("TTS_LANG_CODE", "a"))
+    voice: str = field(default_factory=lambda: _s("TTS_VOICE", "bm_george"))
+    lang_code: str = field(default_factory=lambda: _s("TTS_LANG_CODE", "b"))
     speed: float = field(default_factory=lambda: _f("TTS_SPEED", 1.0))
     sample_rate: int = field(default_factory=lambda: _i("TTS_SAMPLE_RATE", 24000))
 
@@ -141,8 +141,44 @@ class ServerConfig:
     cors_origins: str = field(default_factory=lambda: _s("CORS_ORIGINS", "*"))
 
 
+# --------------------------------------------------------------------------
+# Assistant persona
+# --------------------------------------------------------------------------
+@dataclass(frozen=True)
+class AssistantConfig:
+    name: str = field(default_factory=lambda: _s("ASSISTANT_NAME", "Jarvis"))
+    # How the assistant addresses you. Empty -> "sir".
+    user_name: str = field(default_factory=lambda: _s("USER_NAME", ""))
+    timezone: str = field(default_factory=lambda: _s("TIMEZONE", "Asia/Kolkata"))
+    # How many remembered facts are put in front of the model every turn.
+    memory_in_prompt: int = field(default_factory=lambda: _i("MEMORY_IN_PROMPT", 40))
+    # Plain user/assistant turns restored from the last session on startup.
+    restore_turns: int = field(default_factory=lambda: _i("RESTORE_TURNS", 6))
+
+    @property
+    def address(self) -> str:
+        return self.user_name or "sir"
+
+
+# --------------------------------------------------------------------------
+# Wake word + "conversation window"
+# --------------------------------------------------------------------------
+@dataclass(frozen=True)
+class WakeConfig:
+    enabled: bool = field(default_factory=lambda: _b("WAKE_WORD_ENABLED", True))
+    model: str = field(default_factory=lambda: _s("WAKE_WORD_MODEL", "hey_jarvis"))
+    threshold: float = field(default_factory=lambda: _f("WAKE_WORD_THRESHOLD", 0.5))
+    # After a reply, stay listening this long for a follow-up without the wake word.
+    follow_up_s: float = field(default_factory=lambda: _f("FOLLOW_UP_WINDOW_S", 8.0))
+    acknowledgement: str = field(default_factory=lambda: _s("WAKE_ACK", "Yes, {address}?"))
+    duck_spotify: bool = field(default_factory=lambda: _b("DUCK_SPOTIFY", True))
+    duck_volume: int = field(default_factory=lambda: _i("DUCK_VOLUME", 15))
+
+
 @dataclass(frozen=True)
 class Config:
+    assistant: AssistantConfig = field(default_factory=AssistantConfig)
+    wake: WakeConfig = field(default_factory=WakeConfig)
     audio: AudioConfig = field(default_factory=AudioConfig)
     vad: VADConfig = field(default_factory=VADConfig)
     stt: STTConfig = field(default_factory=STTConfig)

@@ -70,6 +70,15 @@ class InputProcessor:
             logger.debug("discarded likely STT hallucination: %r", text)
             return ProcessedInput(text, raw, False, "likely_hallucination", meta)
 
+        if self.wake_word and not self.require_wake_word:
+            # "Hey Jarvis, what's the time" -> "what's the time". The wake word
+            # detector already did its job; the name is not part of the request.
+            m = re.match(rf"^\s*(?:(?:hey|hi|ok|okay|hello)[\s,]+)?{re.escape(self.wake_word)}\b[\s,.!?]*",
+                         text, re.IGNORECASE)
+            if m and m.end() < len(text):
+                text = text[m.end():]
+                meta["wake_word_stripped"] = True
+
         if self.require_wake_word:
             lowered = text.lower()
             if self.wake_word not in lowered:
