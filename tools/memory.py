@@ -113,3 +113,46 @@ class NotesTool(Tool):
                             {"notes": [], "note": "No notes match that."})
         notes = self.store.list_notes(limit)
         return self._ok({"notes": notes} if notes else {"notes": [], "note": "No notes yet."})
+
+
+class PreferencesTool(Tool):
+    name = "preferences"
+    description = (
+        "Standing rules the user wants you to always follow. Use action 'add' when they "
+        "correct how you behave or state a lasting rule: 'from now on...', 'always...', "
+        "'never...', 'don't do that again', 'too long, keep it shorter', 'stop calling me "
+        "sir'. Write the rule as a short imperative, e.g. 'Keep replies under two "
+        "sentences unless asked to explain'. Use 'list' when asked what your rules are, "
+        "'remove' when they cancel one. Facts about the user go in memory, not here."
+    )
+
+    def __init__(self, store: MemoryStore):
+        self.store = store
+
+    @property
+    def input_schema(self) -> dict:
+        return {
+            "type": "object",
+            "properties": {
+                "action": {"type": "string", "enum": ["add", "list", "remove"]},
+                "rule": {"type": "string", "description": "For 'add': the rule."},
+                "query": {"type": "string",
+                          "description": "For 'remove': words from the rule to cancel."},
+                "rule_id": {"type": "integer", "description": "For 'remove', if known."},
+            },
+            "required": ["action"],
+        }
+
+    def execute(self, action: str = "list", rule: str = "", query: str = "",
+                rule_id: int | None = None, **_) -> ToolResult:
+        if action == "add":
+            if not rule.strip():
+                return self._fail("The rule was empty.")
+            return self._ok(self.store.add_rule(rule))
+        if action == "remove":
+            if rule_id is None and not query.strip():
+                return self._fail("Say which rule to remove.")
+            n = self.store.remove_rule(rule_id=rule_id, query=query)
+            return self._ok({"removed": n}) if n else self._fail("No rule matched that.")
+        rules = self.store.rules()
+        return self._ok({"rules": rules} if rules else {"rules": [], "note": "No rules yet."})

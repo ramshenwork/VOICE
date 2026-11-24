@@ -212,8 +212,9 @@ class LogExpenseTool(Tool):
     name = "log_expense"
     description = (
         "Record a new expense the user just told you about, e.g. 'I spent 200 on an auto' "
-        "or 'add 450 for lunch'. Only call this when the user clearly states an amount they "
-        "spent. Pick a short lowercase category such as food, transport, shopping, "
+        "or 'add 450 for lunch'. Only call this for ONE new purchase the user wants recorded. "
+        "Never for totals or context like 'I've spent 4000 on food this month' -- that is "
+        "information to reason with, not a new expense. Pick a short lowercase category such as food, transport, shopping, "
         "utilities, health, entertainment, travel or other."
     )
 

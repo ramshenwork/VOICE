@@ -117,7 +117,7 @@ class LLMConfig:
     base_url: str = field(default_factory=lambda: _s("LLM_BASE_URL", ""))
     max_tokens: int = field(default_factory=lambda: _i("LLM_MAX_TOKENS", 400))
     temperature: float = field(default_factory=lambda: _f("LLM_TEMPERATURE", 0.4))
-    max_tool_rounds: int = field(default_factory=lambda: _i("LLM_MAX_TOOL_ROUNDS", 3))
+    max_tool_rounds: int = field(default_factory=lambda: _i("LLM_MAX_TOOL_ROUNDS", 5))
     timeout_s: float = field(default_factory=lambda: _f("LLM_TIMEOUT_S", 30.0))
 
 
@@ -188,10 +188,24 @@ class WakeConfig:
     duck_volume: int = field(default_factory=lambda: _i("DUCK_VOLUME", 15))
 
 
+# --------------------------------------------------------------------------
+# Brain: personal context + deep reasoning
+# --------------------------------------------------------------------------
+@dataclass(frozen=True)
+class BrainConfig:
+    # Stronger model used by the `think` tool for plans, decisions and
+    # scenarios. Empty -> same as LLM_MODEL. Same provider and key as the LLM.
+    reasoning_model: str = field(default_factory=lambda: _s("REASONING_MODEL", ""))
+    reasoning_max_tokens: int = field(default_factory=lambda: _i("REASONING_MAX_TOKENS", 1200))
+    profile_path: str = field(default_factory=lambda: _s("PROFILE_PATH", "profile/profile.md"))
+    knowledge_dir: str = field(default_factory=lambda: _s("KNOWLEDGE_DIR", "knowledge"))
+
+
 @dataclass(frozen=True)
 class Config:
     assistant: AssistantConfig = field(default_factory=AssistantConfig)
     wake: WakeConfig = field(default_factory=WakeConfig)
+    brain: BrainConfig = field(default_factory=BrainConfig)
     audio: AudioConfig = field(default_factory=AudioConfig)
     vad: VADConfig = field(default_factory=VADConfig)
     stt: STTConfig = field(default_factory=STTConfig)
@@ -201,6 +215,10 @@ class Config:
     server: ServerConfig = field(default_factory=ServerConfig)
     log_level: str = field(default_factory=lambda: _s("LOG_LEVEL", "INFO"))
     root: Path = ROOT
+
+    def path(self, p: str) -> Path:
+        q = Path(p)
+        return q if q.is_absolute() else self.root / q
 
     def db_path(self) -> Path:
         p = Path(self.tools.database_path)

@@ -19,12 +19,15 @@ import time
 from agent.agent import Agent
 from agent.prompts import build_system_prompt
 from agent.state import ConversationState
+from brain.knowledge import KnowledgeBase
+from brain.profile import Profile
 from config import Config, load_config
 from memory.store import MemoryStore
 from processor.input_processor import InputProcessor
 from stt.engine import STTEngine
 from tools.base import ToolRegistry
-from tools.memory import MemoryTool, NotesTool
+from tools.brain import CalculatorTool, DatesTool, KnowledgeTool, ThinkTool
+from tools.memory import MemoryTool, NotesTool, PreferencesTool
 from tools.personal_data import LogExpenseTool, PersonalDataTool
 from tools.weather import WeatherTool
 from tts.engine import TTSEngine
@@ -55,6 +58,8 @@ class Pipeline:
                                         wake_aliases=self.cfg.wake.phrases.split(","))
         self.tts = TTSEngine(self.cfg.tts)
         self.memory = MemoryStore(self.cfg.db_path())
+        self.profile = Profile(self.cfg.path(self.cfg.brain.profile_path))
+        self.knowledge = KnowledgeBase(self.cfg.path(self.cfg.brain.knowledge_dir))
         expenses = PersonalDataTool(self.cfg.tools, self.cfg.db_path())
         self.registry = ToolRegistry([
             WeatherTool(self.cfg.tools),
@@ -62,15 +67,40 @@ class Pipeline:
             LogExpenseTool(expenses),
             MemoryTool(self.memory),
             NotesTool(self.memory),
+            PreferencesTool(self.memory),
+            CalculatorTool(),
+            DatesTool(self.cfg.assistant.timezone),
+            KnowledgeTool(self.knowledge),
+            ThinkTool(self.cfg.llm, self.cfg.brain.reasoning_model, context=self.user_context,
+                      max_tokens=self.cfg.brain.reasoning_max_tokens),
         ])
         self.state = ConversationState()
         self.agent = self.make_agent(self.state, restore=True)
 
     def system_prompt(self) -> str:
-        """Rebuilt every turn: current time + everything remembered."""
+        """Rebuilt every turn: current time, profile, rules, everything remembered."""
         return build_system_prompt(
             self.cfg.assistant, self.cfg.tools,
-            self.memory.memories(self.cfg.assistant.memory_in_prompt))
+            self.memory.memories(self.cfg.assistant.memory_in_prompt),
+            profile=self.profile.text(), rules=self.memory.rules())
+
+    def user_context(self) -> str:
+        """What the deep-reasoning model gets to know about the user."""
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+        try:
+            now = datetime.now(ZoneInfo(self.cfg.assistant.timezone))
+        except Exception:
+            now = datetime.now()
+        parts = [f"Now: {now.strftime('%A %d %B %Y, %I:%M %p')} "
+                 f"({self.cfg.assistant.timezone}). Home city: {self.cfg.tools.default_location}."]
+        if (p := self.profile.text()):
+            parts.append("User profile:\n" + p)
+        if (r := self.memory.rules()):
+            parts.append("User's standing rules:\n" + "\n".join(f"- {x['rule']}" for x in r))
+        if (m := self.memory.memories(self.cfg.assistant.memory_in_prompt)):
+            parts.append("Known facts:\n" + "\n".join(f"- {x['fact']}" for x in m))
+        return "\n\n".join(parts)
 
     def make_agent(self, state: ConversationState, restore: bool = False) -> Agent:
         """One agent per conversation (the web server makes one per socket);

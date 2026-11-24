@@ -16,7 +16,20 @@ are. Runs on your laptop.
 | "I just spent 180 on an auto" | logs the expense |
 | "How much did I spend on food this week?" | reads your expenses |
 | "What's the weather?" | live weather |
+| "What's 18% GST on 1840?" | exact maths via the calculator, never guessed |
+| "How many days till Christmas?" | calendar maths |
+| "Plan my Saturday..." / "Should I buy X now or next month?" | deep-reasoning mode (`think`) on a stronger model, using your profile and budget |
+| "What does my helmet doc say about the battery?" | searches your own files in `knowledge/` |
+| "From now on, call me boss" | saved as a standing rule she always follows |
 | anything else | conversation, opinions, discussing your projects |
+
+### Making her yours
+
+- **Profile:** copy `profile/profile.example.md` to `profile/profile.md` and fill it in. She reads it on every turn; edits apply instantly.
+- **Knowledge:** drop `.md`/`.txt` project docs into `knowledge/`.
+- **Rules:** just tell her ("never suggest Uber", "keep it shorter") and she keeps them.
+
+`profile/profile.md` and everything in `knowledge/` are git-ignored, so they stay on your machine (they are sent to the LLM as part of each request).
 | "That's all, Riya" | goes back to sleep, Spotify comes back up |
 
 After each reply it keeps listening for `FOLLOW_UP_WINDOW_S` (8 s) so you can

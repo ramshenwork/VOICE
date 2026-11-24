@@ -23,3 +23,10 @@ logs/*
 !logs/.gitkeep
 *.wav
 *.aiff
+
+# personal context -- never commit
+profile/*
+!profile/profile.example.md
+knowledge/*
+!knowledge/.gitkeep
+!knowledge/README.md

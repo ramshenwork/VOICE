@@ -9,6 +9,8 @@ Three kinds of thing live here, and they are deliberately kept apart:
                 look anything up.
   notes         things the user explicitly asked to have written down. Never
                 injected automatically; read back only when asked.
+  rules         standing instructions ("never suggest Uber", "keep replies
+                short"). Always in front of the model, and obeyed over defaults.
   conversation  a log of plain spoken turns, so a restart picks up where the
                 last session left off instead of meeting you for the first time.
 
@@ -35,6 +37,11 @@ CREATE TABLE IF NOT EXISTS notes (
     title       TEXT    NOT NULL DEFAULT '',
     body        TEXT    NOT NULL,
     tags        TEXT    NOT NULL DEFAULT ''
+);
+CREATE TABLE IF NOT EXISTS rules (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at  REAL    NOT NULL,
+    rule        TEXT    NOT NULL
 );
 CREATE TABLE IF NOT EXISTS conversation (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -134,6 +141,33 @@ class MemoryStore:
         d = dict(r)
         d["created"] = time.strftime("%Y-%m-%d %H:%M", time.localtime(d.pop("created_at")))
         return d
+
+    # -- standing rules ----------------------------------------------------
+    def add_rule(self, rule: str) -> dict:
+        rule = _clip(rule)[:300]
+        with self._connect() as conn:
+            dup = conn.execute("SELECT id FROM rules WHERE LOWER(rule) = LOWER(?)",
+                               (rule,)).fetchone()
+            if dup:
+                return {"id": dup["id"], "rule": rule, "duplicate": True}
+            cur = conn.execute("INSERT INTO rules (created_at, rule) VALUES (?,?)",
+                               (time.time(), rule))
+            return {"id": int(cur.lastrowid), "rule": rule}
+
+    def rules(self, limit: int = 50) -> list[dict]:
+        with self._connect() as conn:
+            rows = conn.execute("SELECT id, rule FROM rules ORDER BY id LIMIT ?",
+                                (max(1, int(limit)),)).fetchall()
+        return [dict(r) for r in rows]
+
+    def remove_rule(self, rule_id: int | None = None, query: str = "") -> int:
+        with self._connect() as conn:
+            if rule_id is not None:
+                return conn.execute("DELETE FROM rules WHERE id = ?", (int(rule_id),)).rowcount
+            if query.strip():
+                return conn.execute("DELETE FROM rules WHERE LOWER(rule) LIKE ?",
+                                    (f"%{query.strip().lower()}%",)).rowcount
+        return 0
 
     # -- conversation log --------------------------------------------------
     def log_turn(self, role: str, content: str) -> None:
