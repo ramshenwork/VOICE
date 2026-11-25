@@ -12,24 +12,29 @@ While asleep she only listens for her name. "Hey Riya" wakes her: Spotify is
 turned down, she says "Yes, sir?", and listens -- or, if you said the whole
 request in one breath ("Hey Riya, what's the weather?"), she just answers. After each reply it keeps
 listening for FOLLOW_UP_WINDOW_S so you can carry on without the wake word,
-then goes back to sleep and Spotify comes back up. "That's all" sends it to
-sleep straight away. WAKE_WORD_ENABLED=false gives the old always-listening mode.
+then goes back to sleep and Spotify comes back up. WAKE_WORD_ENABLED=false
+gives the old always-listening mode.
+
+Attention (wake/attention.py)
+-----------------------------
+In the follow-up window she only answers speech that is meant for her: it
+uses her name, answers a question she just asked, or a quick LLM yes/no says
+it's addressed to her. Phone calls and other people's conversations are
+ignored, and two ignored utterances in a row send her back to sleep. "I'm on
+a call", "not now", "be quiet", "that's all" make her go silent at once.
 
 The main loop is single-threaded on purpose. Audio capture already runs on its
 own OS thread and hands frames over a queue, so this thread is free to do VAD
 and, when an utterance ends, the STT/agent/TTS work. During that work the
 capture thread keeps buffering, so nothing is lost.
 
-Barge-in
---------
-The microphone is never closed while the agent speaks. While playback is
-active the VAD keeps running with a raised threshold; if the user starts
-talking, playback is cut immediately and the new utterance is captured.
-
-Acoustic caveat, and it is a real one: on laptop speakers the microphone hears
-the agent's own voice, and no threshold cleanly separates that from a human.
-Use headphones, or set BARGE_IN=false. Solving it properly needs acoustic echo
-cancellation, which is a project of its own.
+Barge-in and echo
+-----------------
+On laptop speakers the microphone hears her own voice. So sound alone never
+cuts her off: speech heard while she talks is transcribed, anything matching
+what she just said is dropped as echo, and she only stops for "stop", "wait"
+or her name. BARGE_IN=false makes her fully deaf while speaking. Headphones
+remain the most reliable setup.
 """
 
 from __future__ import annotations
@@ -37,7 +42,6 @@ from __future__ import annotations
 import argparse
 import logging
 import os
-import re
 import sys
 import time
 
@@ -50,13 +54,13 @@ from audio.output import SpeakerStream
 from config import load_config
 from pipeline import Pipeline, setup_logging
 from vad.detector import VADEvent
+from wake.attention import (STOP_PHRASES, AttentionGate, EchoGuard, llm_classifier,
+                            quiet_request)
 from wake.detector import AwakeSession, TranscriptWake, WakeWordDetector, WakeWordError
 
 logger = logging.getLogger("main")
 
 BARGE_IN = os.getenv("BARGE_IN", "true").lower() in ("1", "true", "yes")
-# Raised threshold while the agent is speaking, to reduce self-triggering.
-BARGE_IN_THRESHOLD = float(os.getenv("BARGE_IN_THRESHOLD", "0.85"))
 
 
 def cmd_devices() -> int:
@@ -140,7 +144,7 @@ def cmd_text(pipeline: Pipeline, speak: bool = True) -> int:
 
 
 def stream_reply(pipeline: Pipeline, speaker: SpeakerStream | None, text: str,
-                 echo: bool = False) -> AgentReply | None:
+                 echo: bool = False, on_sentence=None) -> AgentReply | None:
     """Run one turn, speaking each sentence the moment the model finishes it."""
     reply = None
     t0 = time.perf_counter()
@@ -154,6 +158,8 @@ def stream_reply(pipeline: Pipeline, speaker: SpeakerStream | None, text: str,
             first = False
         if echo:
             print(item, end=" ", flush=True)
+        if on_sentence:
+            on_sentence(item)
         if speaker:
             for chunk in pipeline.tts.stream(item):
                 speaker.play(chunk)
@@ -163,11 +169,6 @@ def stream_reply(pipeline: Pipeline, speaker: SpeakerStream | None, text: str,
         logger.info("latency: agent=%.0fms tools=%s",
                     reply.latency_s * 1000, reply.tools_used or "none")
     return reply
-
-
-SLEEP_PHRASES = re.compile(
-    r"\b(that'?s all|that will be all|go to sleep|stop listening|never ?mind|good ?night)\b",
-    re.IGNORECASE)
 
 
 def _status(msg: str) -> None:
@@ -213,33 +214,94 @@ def cmd_voice(pipeline: Pipeline) -> int:
         ack = pipeline.tts.synthesize(cfg.wake.acknowledgement.replace("{address}",
                                                                        cfg.assistant.address))
 
+    echo_guard = EchoGuard()
+    try:
+        classify = llm_classifier(cfg.llm)
+    except Exception as exc:
+        logger.warning("attention classifier unavailable (%s); using a simple rule", exc)
+        classify = None
+    gate = AttentionGate(name, cfg.wake.phrases.split(","), classify)
+
     def go_to_sleep() -> None:
         session.sleep()
+        gate.reset()
         pipeline.vad.reset()
         if wake:
             wake.reset()
         ducker.restore()
         _status(f"[ asleep -- say 'hey {name.lower()}' ]")
 
-    flags = {"awaiting_playback_end": False, "sleep_after_reply": False}
+    # fresh: the next utterance follows a wake word, so it is for her by definition.
+    flags = {"awaiting_playback_end": False, "fresh": False, "started_while_playing": False}
 
     def wake_up() -> None:
         ducker.duck()
         session.wake()
+        gate.reset()
         pipeline.vad.reset()
+        flags["fresh"] = True
         if ack is not None and ack.size:
+            echo_guard.spoke(cfg.wake.acknowledgement.replace("{address}", cfg.assistant.address))
             speaker.play(ack)
+            flags["awaiting_playback_end"] = True
         _status("[ listening... ]")
 
     def answer(text: str) -> None:
         text = pipeline.processor.process(text).text or text
         print(f"\r  you  : {text:<40}")
         print(f"  {name.lower():<5}: ", end="", flush=True)
-        stream_reply(pipeline, speaker, text, echo=True)
+        reply = stream_reply(pipeline, speaker, text, echo=True, on_sentence=echo_guard.spoke)
         print()
+        gate.last_reply = reply.text if reply else ""
+        gate.reset()
+        flags["fresh"] = False
         pipeline.vad.reset()
         flags["awaiting_playback_end"] = True
-        flags["sleep_after_reply"] = sleeps and bool(SLEEP_PHRASES.search(text))
+
+    def hush() -> None:
+        """Told to be quiet / on a call: stop talking and sleep, without a word."""
+        speaker.stop()
+        flags["awaiting_playback_end"] = False
+        logger.info("quiet request: going to sleep")
+        if sleeps:
+            go_to_sleep()
+        else:
+            _status("[ quiet ]")
+
+    def handle(text: str, during_playback: bool) -> None:
+        """One finished utterance while awake. Decides whether it's for her."""
+        if echo_guard.is_echo(text):
+            logger.info("ignored own voice: %r", text)
+            return
+        if quiet_request(text):
+            hush()
+            return
+        if during_playback:
+            # Interrupting her needs intent: "stop", "wait", or her name.
+            named, rest = name_wake.match(text) if name_wake else (False, "")
+            if STOP_PHRASES.search(text) or named:
+                logger.info("barge-in: %r", text)
+                speaker.stop()
+                flags["awaiting_playback_end"] = False
+                if named and len(rest.split()) >= 2:
+                    answer(rest)
+                else:
+                    session.reply_finished()
+                    _status("[ listening... ]")
+            else:
+                logger.info("ignored while speaking: %r", text)
+            return
+        if flags["fresh"] or gate.addressed(text):
+            answer(text)
+            return
+        # Not for her (phone call, someone else in the room).
+        if sleeps and gate.should_sleep:
+            logger.info("not being spoken to; going back to sleep")
+            go_to_sleep()
+        else:
+            session.resume()
+            _status("[ listening... ]")
+
     last_meter = 0.0
 
     print("\n" + "=" * 56)
@@ -247,8 +309,9 @@ def cmd_voice(pipeline: Pipeline) -> int:
         print(f"  {name} is asleep. Say 'Hey {name}' to wake her. Ctrl-C to quit.")
     else:
         print(f"  {name} is listening. Speak naturally. Ctrl-C to quit.")
-    print(f"  barge-in: {'on' if BARGE_IN else 'off'}   voice: {cfg.tts.voice}"
+    print(f"  barge-in: {'say stop or her name' if BARGE_IN else 'off'}   voice: {cfg.tts.voice}"
           f"   spotify ducking: {'on' if ducker.enabled else 'off'}")
+    print("  On a call? Say 'Riya, I'm on a call' and she goes quiet.")
     print("=" * 56 + "\n")
     if sleeps:
         _status(f"[ asleep -- say 'hey {name.lower()}' ]")
@@ -267,17 +330,22 @@ def cmd_voice(pipeline: Pipeline) -> int:
 
                 # ---- asleep, name engine: listen for "Riya ..." --------
                 if not session.awake and name_wake is not None:
+                    if playing:
+                        continue  # still finishing a sentence; don't hear herself
                     for result in pipeline.vad.process(chunk):
                         if result.event is not VADEvent.SPEECH_ENDED or result.segment is None:
                             continue
                         if result.segment_duration_s > name_wake.max_utterance_s:
                             continue  # long speech/music: not someone calling her
-                        heard = pipeline.stt.transcribe(result.segment, cfg.audio.sample_rate)
-                        woke, rest = name_wake.match(getattr(heard, "text", ""))
-                        if not woke:
-                            logger.debug("asleep, ignored: %r", getattr(heard, "text", ""))
+                        heard = getattr(pipeline.stt.transcribe(
+                            result.segment, cfg.audio.sample_rate), "text", "")
+                        woke, rest = name_wake.match(heard)
+                        if not woke or echo_guard.is_echo(heard):
+                            logger.debug("asleep, ignored: %r", heard)
                             continue
-                        logger.info("woken by name: %r", heard.text)
+                        logger.info("woken by name: %r", heard)
+                        if quiet_request(rest):
+                            continue  # "Riya, I'm on a call" -- stay asleep
                         if len(rest.split()) >= 2:
                             # "Hey Riya, what's the weather?" -- answer straight away.
                             ducker.duck()
@@ -290,10 +358,7 @@ def cmd_voice(pipeline: Pipeline) -> int:
                 # ---- awake: reply playback finished -> start window ----
                 if flags["awaiting_playback_end"] and not playing:
                     flags["awaiting_playback_end"] = False
-                    if flags["sleep_after_reply"]:
-                        flags["sleep_after_reply"] = False
-                        go_to_sleep()
-                        continue
+                    echo_guard.playback_ended()
                     session.reply_finished()
                     _status("[ listening... ]")
 
@@ -306,23 +371,21 @@ def cmd_voice(pipeline: Pipeline) -> int:
 
                 for result in pipeline.vad.process(chunk):
                     if result.event is VADEvent.SPEECH_STARTED:
-                        if playing:
-                            if result.speech_probability < BARGE_IN_THRESHOLD:
-                                continue
-                            logger.info("barge-in: stopping playback")
-                            speaker.stop()
-                        session.user_speaking()
-                        _status("[ listening... ]")
+                        # While she talks, speech is probably her own echo: don't
+                        # cut her off on sound alone, decide on the words.
+                        flags["started_while_playing"] = playing or echo_guard.in_tail()
+                        if not playing:
+                            session.user_speaking()
 
                     elif result.event is VADEvent.SPEECH_ENDED and result.segment is not None:
-                        _status("[ thinking... ]")
                         text, reason = pipeline.transcribe_utterance(
                             result.segment, cfg.audio.sample_rate)
                         if text is None:
-                            session.reply_finished()
-                            _status("[ listening... ]" if sleeps else "")
+                            if not speaker.is_playing:
+                                session.resume()
                             continue
-                        answer(text)
+                        handle(text, during_playback=flags["started_while_playing"]
+                               and speaker.is_playing)
 
                 # cheap level meter while idle in always-listening mode
                 if not sleeps and not playing and time.time() - last_meter > 0.25:

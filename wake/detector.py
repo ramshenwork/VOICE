@@ -94,21 +94,28 @@ class AwakeSession:
         self.clock = clock
         self.awake = False
         self._deadline: float | None = None
+        self._window_end: float | None = None
 
     def wake(self) -> None:
         self.awake = True
-        self._deadline = self.clock() + max(self.follow_up_s, 6.0)
+        self._deadline = self._window_end = self.clock() + max(self.follow_up_s, 6.0)
 
     def user_speaking(self) -> None:
         """Speech started: never time out mid-sentence."""
         self._deadline = None
 
     def reply_finished(self) -> None:
-        self._deadline = self.clock() + self.follow_up_s
+        self._deadline = self._window_end = self.clock() + self.follow_up_s
+
+    def resume(self) -> None:
+        """Speech that wasn't for her: carry on the window that was already
+        running instead of granting a fresh one, so background talk can't
+        keep her awake forever."""
+        self._deadline = self._window_end if self._window_end is not None else self.clock()
 
     def sleep(self) -> None:
         self.awake = False
-        self._deadline = None
+        self._deadline = self._window_end = None
 
     def expired(self) -> bool:
         return (self.awake and self._deadline is not None

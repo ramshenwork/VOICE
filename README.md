@@ -30,7 +30,9 @@ are. Runs on your laptop.
 - **Rules:** just tell her ("never suggest Uber", "keep it shorter") and she keeps them.
 
 `profile/profile.md` and everything in `knowledge/` are git-ignored, so they stay on your machine (they are sent to the LLM as part of each request).
-| "That's all, Riya" | goes back to sleep, Spotify comes back up |
+| "That's all, Riya" / "I'm on a call" / "not now" | goes silent and back to sleep at once, Spotify comes back up |
+| talking to someone else / on a phone call | ignored -- she only answers speech meant for her, and sleeps after two ignored lines |
+| her own voice through the speakers | recognised as echo and ignored; say "stop" or "Riya" to interrupt her |
 
 After each reply it keeps listening for `FOLLOW_UP_WINDOW_S` (8 s) so you can
 carry on without saying the wake word again. Replies are streamed: it starts
