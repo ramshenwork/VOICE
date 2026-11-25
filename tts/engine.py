@@ -24,6 +24,8 @@ import logging
 import re
 import subprocess
 import tempfile
+import time
+from pathlib import Path
 from typing import Iterator
 
 import numpy as np
@@ -102,18 +104,116 @@ class SentenceBuffer:
         return parts
 
 
-class TTSEngine:
-    """Kokoro-backed synthesiser with a graceful system fallback."""
+class CloneVoice:
+    """
+    Client for tts/clone_server.py. Starts the server in its own virtualenv
+    if it isn't already running, and stops it again on exit.
+    """
 
-    def __init__(self, config):
+    def __init__(self, cfg, root: Path):
+        self.cfg = cfg
+        self.root = root
+        self.url = f"http://127.0.0.1:{cfg.clone_port}"
+        self.sample_rate = 24000
+        self._proc = None
+
+    def _path(self, p: str) -> Path:
+        q = Path(p)
+        return q if q.is_absolute() else self.root / q
+
+    def _health(self, timeout: float = 1.0) -> dict | None:
+        import json
+        import urllib.request
+        try:
+            with urllib.request.urlopen(self.url + "/health", timeout=timeout) as r:
+                return json.loads(r.read())
+        except Exception:
+            return None
+
+    def start(self, wait_s: float = 600.0) -> None:
+        info = self._health()
+        if info is None:
+            python = self._path(self.cfg.clone_python)
+            if not python.exists():
+                raise TTSError(f"{python} not found -- set up .venv-voice first (see README)")
+            sample = self._path(self.cfg.clone_sample)
+            cmd = [str(python), str(self.root / "tts" / "clone_server.py"),
+                   "--port", str(self.cfg.clone_port),
+                   "--model", self.cfg.clone_model,
+                   "--voice", str(sample) if sample.exists() else "",
+                   "--exaggeration", str(self.cfg.clone_exaggeration),
+                   "--cfg-weight", str(self.cfg.clone_cfg_weight)]
+            if not sample.exists():
+                logger.warning("voice sample %s not found; clone server uses its default voice",
+                               sample)
+            log_path = self.root / "logs" / "clone_tts.log"
+            log_path.parent.mkdir(exist_ok=True)
+            self._proc = subprocess.Popen(cmd, stdout=open(log_path, "ab"),
+                                          stderr=subprocess.STDOUT, cwd=self.root)
+            import atexit
+            atexit.register(self.stop)
+            logger.info("starting cloned-voice server (first run downloads the model)...")
+            deadline = time.monotonic() + wait_s
+            while (info := self._health()) is None:
+                if self._proc.poll() is not None:
+                    raise TTSError(f"clone server exited; see {log_path}")
+                if time.monotonic() > deadline:
+                    self.stop()
+                    raise TTSError("clone server did not start in time")
+                time.sleep(1.0)
+        self.sample_rate = int(info.get("sample_rate", 24000))
+        logger.info("tts backend: cloned voice (%s on %s)", info.get("voice"), info.get("device"))
+
+    def stop(self) -> None:
+        if self._proc is not None and self._proc.poll() is None:
+            self._proc.terminate()
+            try:
+                self._proc.wait(timeout=5)
+            except Exception:
+                self._proc.kill()
+        self._proc = None
+
+    def speak(self, text: str) -> np.ndarray | None:
+        import json
+        import urllib.request
+        req = urllib.request.Request(self.url + "/speak", data=json.dumps({"text": text}).encode(),
+                                     headers={"Content-Type": "application/json"})
+        try:
+            with urllib.request.urlopen(req, timeout=60) as r:
+                rate = int(r.headers.get("X-Sample-Rate", self.sample_rate))
+                pcm = np.frombuffer(r.read(), dtype="<f4").astype(np.float32)
+        except Exception as exc:
+            logger.error("cloned voice failed: %s", exc)
+            return None
+        if rate != self.sample_rate:
+            logger.warning("clone server rate changed %s -> %s", self.sample_rate, rate)
+        return pcm
+
+
+class TTSEngine:
+    """Kokoro-backed synthesiser with a cloned-voice option and a graceful
+    system fallback."""
+
+    def __init__(self, config, root: Path | None = None):
         self.cfg = config
         self.sample_rate = config.sample_rate
         self._pipeline = None
         self._backend = ""
+        self._clone: CloneVoice | None = None
+        self._root = root or Path(__file__).resolve().parent.parent
 
     def load(self) -> None:
-        if self._pipeline is not None or self._backend == "system":
+        if self._pipeline is not None or self._backend in ("system", "clone"):
             return
+        if self.cfg.engine.lower() == "clone":
+            try:
+                clone = CloneVoice(self.cfg, self._root)
+                clone.start()
+                self._clone, self._backend = clone, "clone"
+                self.sample_rate = clone.sample_rate
+                return
+            except Exception as exc:
+                logger.warning("cloned voice unavailable (%s); using kokoro", exc)
         if self.cfg.engine.lower() == "system":
             self._backend = "system"
             self.sample_rate = 22050
@@ -151,6 +251,8 @@ class TTSEngine:
 
     # -- backends ----------------------------------------------------------
     def _synth_one(self, text: str) -> np.ndarray | None:
+        if self._backend == "clone":
+            return self._clone.speak(text)
         if self._backend == "kokoro":
             try:
                 out = []

@@ -30,3 +30,8 @@ profile/*
 knowledge/*
 !knowledge/.gitkeep
 !knowledge/README.md
+
+# cloned voice: separate env and the (personal) sample
+.venv-voice/
+voice/*
+!voice/README.md

@@ -104,6 +104,17 @@ class TTSConfig:
     lang_code: str = field(default_factory=lambda: _s("TTS_LANG_CODE", "a"))
     speed: float = field(default_factory=lambda: _f("TTS_SPEED", 1.0))
     sample_rate: int = field(default_factory=lambda: _i("TTS_SAMPLE_RATE", 24000))
+    # TTS_ENGINE=clone: speak in a voice cloned from a sample (Chatterbox,
+    # running in .venv-voice as a local server). Falls back to Kokoro.
+    clone_sample: str = field(default_factory=lambda: _s("TTS_CLONE_SAMPLE", "voice/sample.wav"))
+    clone_python: str = field(default_factory=lambda: _s("TTS_CLONE_PYTHON", ".venv-voice/bin/python"))
+    clone_port: int = field(default_factory=lambda: _i("TTS_CLONE_PORT", 5175))
+    # turbo = fast enough to talk with; standard = more expressive, ~4s/sentence
+    clone_model: str = field(default_factory=lambda: _s("TTS_CLONE_MODEL", "turbo"))
+    # standard model only: 0.25 flat .. 0.5 natural .. 1.0 very expressive
+    clone_exaggeration: float = field(default_factory=lambda: _f("TTS_CLONE_EXAGGERATION", 0.5))
+    # standard model only: lower = slower, more deliberate pacing
+    clone_cfg_weight: float = field(default_factory=lambda: _f("TTS_CLONE_CFG_WEIGHT", 0.5))
 
 
 # --------------------------------------------------------------------------
